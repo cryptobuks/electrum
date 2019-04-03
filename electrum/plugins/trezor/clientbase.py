@@ -1,10 +1,11 @@
 import time
 from struct import pack
 
+from electrum import ecc
 from electrum.i18n import _
 from electrum.util import PrintError, UserCancelled, UserFacingException
 from electrum.keystore import bip39_normalize_passphrase
-from electrum.bip32 import serialize_xpub, convert_bip32_path_to_list_of_uint32 as parse_path
+from electrum.bip32 import BIP32Node, convert_bip32_path_to_list_of_uint32 as parse_path
 
 from trezorlib.client import TrezorClient
 from trezorlib.exceptions import TrezorFailure, Cancelled, OutdatedFirmwareError
@@ -65,7 +66,7 @@ class TrezorClientBase(PrintError):
             if issubclass(exc_type, Cancelled):
                 raise UserCancelled from exc_value
             elif issubclass(exc_type, TrezorFailure):
-                raise RuntimeError(exc_value.message) from exc_value
+                raise RuntimeError(str(exc_value)) from exc_value
             elif issubclass(exc_type, OutdatedFirmwareError):
                 raise UserFacingException(exc_value) from exc_value
             else:
@@ -120,7 +121,12 @@ class TrezorClientBase(PrintError):
         address_n = parse_path(bip32_path)
         with self.run_flow(creating_wallet=creating):
             node = trezorlib.btc.get_public_node(self.client, address_n).node
-        return serialize_xpub(xtype, node.chain_code, node.public_key, node.depth, self.i4b(node.fingerprint), self.i4b(node.child_num))
+        return BIP32Node(xtype=xtype,
+                         eckey=ecc.ECPubkey(node.public_key),
+                         chaincode=node.chain_code,
+                         depth=node.depth,
+                         fingerprint=self.i4b(node.fingerprint),
+                         child_number=self.i4b(node.child_num)).to_xpub()
 
     def toggle_passphrase(self):
         if self.features.passphrase_protection:
@@ -147,7 +153,7 @@ class TrezorClientBase(PrintError):
         else:
             msg = _("Confirm on your {} device to set a PIN")
         with self.run_flow(msg):
-            trezorlib.device.change_pin(remove)
+            trezorlib.device.change_pin(self.client, remove)
 
     def clear_session(self):
         '''Clear the session to force pin (and passphrase if enabled)
@@ -203,6 +209,7 @@ class TrezorClientBase(PrintError):
                 self.client,
                 *args,
                 input_callback=input_callback,
+                type=recovery_type,
                 **kwargs)
 
     # ========= Unmodified trezorlib methods =========

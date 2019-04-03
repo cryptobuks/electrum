@@ -148,7 +148,7 @@ class Satoshis(object):
         return 'Satoshis(%d)'%self.value
 
     def __str__(self):
-        return format_satoshis(self.value) + " BTC"
+        return format_satoshis(self.value)
 
     def __eq__(self, other):
         return self.value == other.value
@@ -174,7 +174,7 @@ class Fiat(object):
         if self.value is None or self.value.is_nan():
             return _('No Data')
         else:
-            return "{:.2f}".format(self.value) + ' ' + self.ccy
+            return "{:.2f}".format(self.value)
 
     def __eq__(self, other):
         return self.ccy == other.ccy and self.value == other.value
@@ -199,7 +199,7 @@ class MyEncoder(json.JSONEncoder):
             return obj.isoformat(' ')[:-3]
         if isinstance(obj, set):
             return list(obj)
-        return super(MyEncoder, self).default(obj)
+        return super().default(obj)
 
 class PrintError(object):
     '''A handy base class'''
@@ -407,6 +407,10 @@ def assert_file_in_datadir_available(path, config_path):
             'Should be at {}'.format(path))
 
 
+def standardize_path(path):
+    return os.path.normcase(os.path.realpath(os.path.abspath(path)))
+
+
 def get_new_wallet_name(wallet_folder: str) -> str:
     i = 1
     while True:
@@ -462,7 +466,6 @@ def to_bytes(something, encoding='utf8') -> bytes:
 
 
 bfh = bytes.fromhex
-hfu = binascii.hexlify
 
 
 def bh2u(x: bytes) -> str:
@@ -473,7 +476,7 @@ def bh2u(x: bytes) -> str:
     >>> bh2u(x)
     '01020A'
     """
-    return hfu(x).decode('ascii')
+    return x.hex()
 
 
 def user_dir():
@@ -489,9 +492,38 @@ def user_dir():
         #raise Exception("No home directory found in environment variables.")
         return
 
+
+def resource_path(*parts):
+    return os.path.join(pkg_dir, *parts)
+
+
+# absolute path to python package folder of electrum ("lib")
+pkg_dir = os.path.split(os.path.realpath(__file__))[0]
+
+
 def is_valid_email(s):
     regexp = r"[^@]+@[^@]+\.[^@]+"
     return re.match(regexp, s) is not None
+
+
+def is_hash256_str(text: str) -> bool:
+    if not isinstance(text, str): return False
+    if len(text) != 64: return False
+    try:
+        bytes.fromhex(text)
+    except:
+        return False
+    return True
+
+
+def is_non_negative_integer(val) -> bool:
+    try:
+        val = int(val)
+        if val >= 0:
+            return True
+    except:
+        pass
+    return False
 
 
 def format_satoshis_plain(x, decimal_point = 8):
@@ -730,7 +762,7 @@ def parse_URI(uri: str, on_pr: Callable=None) -> dict:
         out['address'] = address
     if 'amount' in out:
         am = out['amount']
-        m = re.match('([0-9\.]+)X([0-9])', am)
+        m = re.match(r'([0-9.]+)X([0-9])', am)
         if m:
             k = int(m.group(2)) - 8
             amount = Decimal(m.group(1)) * pow(  Decimal(10) , k)
@@ -766,17 +798,25 @@ def parse_URI(uri: str, on_pr: Callable=None) -> dict:
     return out
 
 
-def create_URI(addr, amount, message):
+def create_bip21_uri(addr, amount_sat: Optional[int], message: Optional[str],
+                     *, extra_query_params: Optional[dict] = None) -> str:
     from . import bitcoin
     if not bitcoin.is_address(addr):
         return ""
+    if extra_query_params is None:
+        extra_query_params = {}
     query = []
-    if amount:
-        query.append('amount=%s'%format_satoshis_plain(amount))
+    if amount_sat:
+        query.append('amount=%s'%format_satoshis_plain(amount_sat))
     if message:
         query.append('message=%s'%urllib.parse.quote(message))
+    for k, v in extra_query_params.items():
+        if not isinstance(k, str) or k != urllib.parse.quote(k):
+            raise Exception(f"illegal key for URI: {repr(k)}")
+        v = urllib.parse.quote(v)
+        query.append(f"{k}={v}")
     p = urllib.parse.ParseResult(scheme='bitcoin', netloc='', path=addr, params='', query='&'.join(query), fragment='')
-    return urllib.parse.urlunparse(p)
+    return str(urllib.parse.urlunparse(p))
 
 
 # Python bug (http://bugs.python.org/issue1927) causes raw_input
@@ -908,11 +948,13 @@ class TxMinedInfo(NamedTuple):
     header_hash: Optional[str] = None  # hash of block that mined tx
 
 
-def make_aiohttp_session(proxy: dict, headers=None, timeout=None):
+def make_aiohttp_session(proxy: Optional[dict], headers=None, timeout=None):
     if headers is None:
         headers = {'User-Agent': 'Electrum'}
     if timeout is None:
         timeout = aiohttp.ClientTimeout(total=10)
+    elif isinstance(timeout, (int, float)):
+        timeout = aiohttp.ClientTimeout(total=timeout)
     ssl_context = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cafile=ca_path)
 
     if proxy:
@@ -923,10 +965,10 @@ def make_aiohttp_session(proxy: dict, headers=None, timeout=None):
             username=proxy.get('user', None),
             password=proxy.get('password', None),
             rdns=True,
-            ssl_context=ssl_context,
+            ssl=ssl_context,
         )
     else:
-        connector = aiohttp.TCPConnector(ssl_context=ssl_context)
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
 
     return aiohttp.ClientSession(headers=headers, timeout=timeout, connector=connector)
 
@@ -1074,3 +1116,14 @@ class OrderedDictWithIndex(OrderedDict):
             self._key_to_pos[key] = pos
             self._pos_to_key[pos] = key
         return ret
+
+
+def multisig_type(wallet_type):
+    '''If wallet_type is mofn multi-sig, return [m, n],
+    otherwise return None.'''
+    if not wallet_type:
+        return None
+    match = re.match(r'(\d+)of(\d+)', wallet_type)
+    if match:
+        match = [int(x) for x in match.group(1, 2)]
+    return match
